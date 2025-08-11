@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Extractor de Extractos Bancarios AvVillas</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- pdf.js library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.min.js"></script>
+    <style>
+        /* Custom styles for better UX */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Style for the file input button */
+        .file-input-button {
+            cursor: pointer;
+            display: inline-block;
+            text-align: center;
+        }
+        /* Simple spinner animation */
+        .spinner {
+            border-top-color: #3498db;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 antialiased">
+
+    <div class="container mx-auto p-4 sm:p-6 lg:p-8 max-w-5xl">
+        
+        <!-- Header Section -->
+        <header class="bg-white shadow-md rounded-xl p-6 mb-6">
+            <h1 class="text-2xl sm:text-3xl font-bold text-gray-900">Extractor de Extractos Bancarios AvVillas</h1>
+            <p class="mt-2 text-gray-600">Sube un archivo PDF de tu extracto bancario para extraer las transacciones y exportarlas a CSV o JSON.</p>
+        </header>
+
+        <!-- Main Content Area -->
+        <main class="bg-white shadow-md rounded-xl p-6">
+            
+            <!-- Controls Section -->
+            <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
+                <!-- File Upload -->
+                <div>
+                    <label for="pdf-upload" class="file-input-button bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-300">
+                        Seleccionar PDF
+                    </label>
+                    <input type="file" id="pdf-upload" accept=".pdf" class="hidden">
+                    <span id="file-name" class="ml-4 text-gray-500">Ningún archivo seleccionado</span>
+                </div>
+                
+                <!-- Export Buttons -->
+                <div id="export-buttons" class="flex items-center gap-3" style="display: none;">
+                    <button onclick="exportCSV()" class="bg-green-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-green-700 transition duration-300">
+                        Exportar CSV
+                    </button>
+                    <button onclick="exportJSON()" class="bg-yellow-500 text-white font-bold py-2 px-4 rounded-lg hover:bg-yellow-600 transition duration-300">
+                        Exportar JSON
+                    </button>
+                </div>
+            </div>
+
+            <!-- Status/Loading Section -->
+            <div id="status-container" class="text-center p-4 my-4 rounded-lg" style="display:none;"></div>
+
+            <!-- Transactions Table Section -->
+            <div id="table-container" class="overflow-x-auto" style="display: none;">
+                <h3 class="text-xl font-semibold mb-4">Transacciones Extraídas</h3>
+                <table class="min-w-full bg-white border border-gray-200 rounded-lg">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fecha</th>
+                            <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Descripción</th>
+                            <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Valor</th>
+                            <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Saldo</th>
+                        </tr>
+                    </thead>
+                    <tbody id="transactions-table" class="divide-y divide-gray-200">
+                        <!-- Rows will be inserted here by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+
+        </main>
+
+    </div>
+
+    <script>
+    // Set the worker source for pdf.js
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.worker.min.js";
+    
+    // Global variable to hold transaction data
+    let transactionsData = [];
+
+    // DOM element references
+    const fileUpload = document.getElementById('pdf-upload');
+    const fileNameSpan = document.getElementById('file-name');
+    const statusContainer = document.getElementById('status-container');
+    const tableContainer = document.getElementById('table-container');
+    const tableBody = document.getElementById('transactions-table');
+    const exportButtons = document.getElementById('export-buttons');
+
+    // Event listener for file selection
+    fileUpload.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            fileNameSpan.textContent = file.name;
+            handleFile(file);
+        } else {
+            fileNameSpan.textContent = 'Ningún archivo seleccionado';
+        }
+    });
+
+    /**
+     * Handles the uploaded PDF file.
+     * @param {File} file The PDF file selected by the user.
+     */
+    async function handleFile(file) {
+        showLoading('Procesando PDF, por favor espera...');
+        resetUI();
+
+        try {
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const pdfData = new Uint8Array(e.target.result);
+                    const pdf = await pdfjsLib.getDocument({ data: pdfData }).promise;
+                    
+                    let allLines = [];
+                    for (let i = 1; i <= pdf.numPages; i++) {
+                        const page = await pdf.getPage(i);
+                        const textContent = await page.getTextContent();
+                        
+                        // Sort text items by their vertical position to approximate reading order.
+                        // This is a common strategy but might not be perfect for all PDF layouts.
+                        let items = textContent.items.sort((a, b) => {
+                            if (a.transform[5] > b.transform[5]) return -1;
+                            if (a.transform[5] < b.transform[5]) return 1;
+                            // If on the same line, sort by horizontal position
+                            if (a.transform[4] > b.transform[4]) return 1;
+                            if (a.transform[4] < b.transform[4]) return -1;
+                            return 0;
+                        });
+                        
+                        // Simple approach to group items on the same line
+                        let currentY = -1;
+                        let lineText = '';
+                        items.forEach(item => {
+                            if (currentY !== -1 && Math.abs(currentY - item.transform[5]) > 5) { // 5 is a threshold
+                                allLines.push(lineText.trim());
+                                lineText = '';
+                            }
+                            lineText += item.str + ' ';
+                            currentY = item.transform[5];
+                        });
+                        if (lineText) allLines.push(lineText.trim());
+                    }
+                    
+                    parseData(allLines);
+                    hideLoading();
+
+                } catch (error) {
+                    console.error("Error processing PDF content:", error);
+                    showError("Error al procesar el contenido del PDF. Asegúrate de que el archivo no esté dañado.");
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        } catch (error) {
+            console.error("Error reading file:", error);
+            showError("No se pudo leer el archivo seleccionado.");
+        }
+    }
+
+    /**
+     * Parses the extracted lines of text to find transactions.
+     * Note: This logic is specific to a particular bank statement format.
+     * @param {string[]} lines An array of text lines from the PDF.
+     */
+    function parseData(lines) {
+        transactionsData = [];
+        // Regex to identify a line starting with a date in YYYY/MM/DD format.
+        const dateRegex = /^\d{4}\/\d{2}\/\d{2}/;
+        let inTransactionSection = false;
+        
+        // Keywords to start and stop the transaction parsing
+        const startKeyword = 'FECHA';
+        const stopKeywords = ['CERTIVILLAS', 'VILLADIARIO', 'SALDO ANTERIOR'];
+
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) continue;
+
+            // Check for the header of the transaction table
+            if (trimmedLine.toUpperCase().includes(startKeyword)) {
+                inTransactionSection = true;
+                continue;
+            }
+
+            // Check for keywords that indicate the end of the transaction list
+            if (stopKeywords.some(keyword => trimmedLine.toUpperCase().startsWith(keyword))) {
+                inTransactionSection = false;
+                continue; // Stop processing if we hit a stop keyword
+            }
+
+            if (inTransactionSection && dateRegex.test(trimmedLine)) {
+                // This regex attempts to capture the full transaction line.
+                // It assumes the structure: DATE DESCRIPTION VALUE BALANCE
+                const transactionRegex = /^(\d{4}\/\d{2}\/\d{2})\s+(.*?)\s+([\-]?\$?\s?[0-9.,]+)\s+([\-]?\$?\s?[0-9.,]+)$/;
+                const match = trimmedLine.match(transactionRegex);
+                
+                if (match) {
+                    transactionsData.push({
+                        fecha: match[1],
+                        descripcion: match[2].trim(),
+                        valor: cleanAmount(match[3]),
+                        saldo: cleanAmount(match[4])
+                    });
+                }
+            }
+        }
+
+        renderTable();
+    }
+
+    /**
+     * Cleans and converts a currency string to a floating-point number.
+     * This version handles formats like "$ 1,234,567.89" where ',' is the thousands separator.
+     * @param {string} str The currency string.
+     * @returns {number} The parsed number.
+     */
+    function cleanAmount(str) {
+        if (!str) return 0;
+        // Remove currency symbols ($) and thousands separators (,) before parsing.
+        // This makes it robust for formats like "1,234,567.89".
+        let cleaned = String(str).replace(/\$/g, '').replace(/,/g, '').trim();
+        return parseFloat(cleaned) || 0;
+    }
+
+    /**
+     * Formats a number into a currency string for display using Colombian locale.
+     * This will format numbers like 1234567.89 to "$ 1.234.567,89".
+     * @param {number} value The number to format.
+     * @returns {string} The formatted currency string.
+     */
+    function formatCurrency(value) {
+        return value.toLocaleString('es-CO', { style: 'currency', currency: 'COP' });
+    }
+
+    /**
+     * Renders the extracted transaction data into the HTML table.
+     */
+    function renderTable() {
+        tableBody.innerHTML = ''; // Clear previous results
+        if (transactionsData.length > 0) {
+            transactionsData.forEach(tx => {
+                const row = document.createElement('tr');
+                row.className = 'hover:bg-gray-50';
+                row.innerHTML = `
+                    <td class="py-3 px-4 text-sm">${tx.fecha}</td>
+                    <td class="py-3 px-4 text-sm">${tx.descripcion}</td>
+                    <td class="py-3 px-4 text-sm text-right font-mono">${formatCurrency(tx.valor)}</td>
+                    <td class="py-3 px-4 text-sm text-right font-mono">${formatCurrency(tx.saldo)}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+            tableContainer.style.display = 'block';
+            exportButtons.style.display = 'flex';
+            showSuccess(`Se encontraron ${transactionsData.length} transacciones.`);
+        } else {
+            showWarning('No se encontraron transacciones con el formato esperado en el PDF.');
+        }
+    }
+
+    /**
+     * Exports the transaction data to a CSV file.
+     */
+    function exportCSV() {
+        if (transactionsData.length === 0) {
+            showError("No hay datos para exportar.");
+            return;
+        }
+
+        let csv = 'Fecha;Descripcion;Valor;Saldo\n';
+        transactionsData.forEach(tx => {
+            // Format for Excel in Spanish-speaking regions (comma as decimal separator)
+            const valor = tx.valor.toFixed(2).replace('.', ',');
+            const saldo = tx.saldo.toFixed(2).replace('.', ',');
+            // Escape double quotes within the description
+            const descripcion = `"${tx.descripcion.replace(/"/g, '""')}"`;
+            csv += `${tx.fecha};${descripcion};${valor};${saldo}\n`;
+        });
+        downloadFile(csv, 'movimientos.csv', 'text/csv;charset=utf-8;');
+    }
+
+    /**
+     * Exports the transaction data to a JSON file.
+     */
+    function exportJSON() {
+        if (transactionsData.length === 0) {
+            showError("No hay datos para exportar.");
+            return;
+        }
+        const json = JSON.stringify(transactionsData, null, 2);
+        downloadFile(json, 'movimientos.json', 'application/json;charset=utf-8;');
+    }
+
+    /**
+     * Triggers a browser download for the given content.
+     * @param {string} content The file content.
+     * @param {string} fileName The desired name of the file.
+     * @param {string} contentType The MIME type of the file.
+     */
+    function downloadFile(content, fileName, contentType) {
+        const a = document.createElement("a");
+        const file = new Blob([content], { type: contentType });
+        a.href = URL.createObjectURL(file);
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+    }
+
+    // --- UI Helper Functions ---
+
+    function showLoading(message) {
+        statusContainer.style.display = 'block';
+        statusContainer.className = 'text-center p-4 my-4 rounded-lg bg-blue-100 text-blue-800 flex items-center justify-center';
+        statusContainer.innerHTML = `<div class="spinner w-6 h-6 border-4 border-gray-300 rounded-full mr-3"></div><span>${message}</span>`;
+    }
+
+    function hideLoading() {
+        if (!statusContainer.classList.contains('bg-green-100') && !statusContainer.classList.contains('bg-red-100')) {
+             statusContainer.style.display = 'none';
+        }
+    }
+    
+    function showSuccess(message) {
+        statusContainer.style.display = 'block';
+        statusContainer.className = 'text-center p-4 my-4 rounded-lg bg-green-100 text-green-800';
+        statusContainer.textContent = message;
+    }
+
+    function showWarning(message) {
+        statusContainer.style.display = 'block';
+        statusContainer.className = 'text-center p-4 my-4 rounded-lg bg-yellow-100 text-yellow-800';
+        statusContainer.textContent = message;
+    }
+
+    function showError(message) {
+        statusContainer.style.display = 'block';
+        statusContainer.className = 'text-center p-4 my-4 rounded-lg bg-red-100 text-red-800';
+        statusContainer.textContent = message;
+    }
+
+    function resetUI() {
+        tableContainer.style.display = 'none';
+        exportButtons.style.display = 'none';
+        tableBody.innerHTML = '';
+    }
+
+    </script>
+</body>
+</html>
